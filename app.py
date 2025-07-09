@@ -1,29 +1,34 @@
 import streamlit as st
 import os
+import io
 import PyPDF2
 import docx
-from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 
 # ----------- Util: Text Extraction -----------
 def extract_text(file, file_type):
-    if file_type == "txt":
-        return file.read().decode("utf-8")
-    elif file_type == "pdf":
-        reader = PyPDF2.PdfReader(file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() or ""
-        return text
-    elif file_type == "md":
-        return file.read().decode("utf-8")
-    elif file_type == "docx":
-        doc_file = docx.Document(file)
-        return "\n".join([para.text for para in doc_file.paragraphs])
-    else:
-        return ""
+    try:
+        if file_type == "txt":
+            return file.read().decode("utf-8")
+        elif file_type == "pdf":
+            file.seek(0)
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() or ""
+            return text
+        elif file_type == "md":
+            return file.read().decode("utf-8")
+        elif file_type == "docx":
+            file.seek(0)
+            doc_file = docx.Document(io.BytesIO(file.read()))
+            return "\n".join([para.text for para in doc_file.paragraphs])
+        else:
+            return ""
+    except Exception as e:
+        return f"ERROR: {e}"
 
 def get_file_type(file):
     filename = file.name.lower()
@@ -42,18 +47,33 @@ def get_file_type(file):
 st.set_page_config(page_title="AI Job Application Agent", layout="centered")
 st.title("🧑‍💼 AI Job Application Assistant")
 st.markdown(
-    "Upload your **resume** and a **job description** (in `.txt`, `.pdf`, `.md`, or `.docx`). The app analyzes both, identifies skill gaps, and generates a tailored cover letter using OpenAI's GPT-4o."
+    """
+    Upload your **resume** and a **job description** (`.txt`, `.pdf`, `.md`, `.docx`).  
+    The app analyzes both, identifies skill gaps, and generates a tailored cover letter using OpenAI's GPT-4o.
+
+    :blue[**Tip:** Never share your API key. If deploying for multiple users, store it securely server-side.]
+    """
 )
+
+with st.sidebar:
+    st.header("Instructions")
+    st.markdown(
+        """
+        1. Upload your resume.
+        2. Upload the job description.
+        3. Enter your OpenAI API key.
+        4. Click **Run AI Job Agent** and review the results!
+        """
+    )
+    st.caption("All data is processed locally. Your API key is not stored.")
 
 resume_file = st.file_uploader("Upload Resume (.txt, .pdf, .md, .docx)", type=["txt", "pdf", "md", "docx"])
 job_desc_file = st.file_uploader("Upload Job Description (.txt, .pdf, .md, .docx)", type=["txt", "pdf", "md", "docx"])
-
 api_key = st.text_input("Enter your OpenAI API key", type="password")
-if api_key:
-    os.environ["OPENAI_API_KEY"] = api_key
 
-# ----------- On Button Click -----------
-if st.button("Run AI Job Agent"):
+run_button = st.button("Run AI Job Agent", type="primary")
+
+if run_button:
     if not resume_file or not job_desc_file or not api_key:
         st.warning("Please upload both files and provide your OpenAI API key.")
         st.stop()
@@ -61,18 +81,15 @@ if st.button("Run AI Job Agent"):
     resume_type = get_file_type(resume_file)
     job_type = get_file_type(job_desc_file)
 
-    try:
-        resume_text = extract_text(resume_file, resume_type)
-    except Exception as e:
-        st.error(f"Error reading resume: {e}")
-        st.stop()
+    resume_text = extract_text(resume_file, resume_type)
+    job_desc_text = extract_text(job_desc_file, job_type)
 
-    try:
-        job_desc_text = extract_text(job_desc_file, job_type)
-    except Exception as e:
-        st.error(f"Error reading job description: {e}")
+    if resume_text.startswith("ERROR:"):
+        st.error(f"Error reading resume: {resume_text}")
         st.stop()
-
+    if job_desc_text.startswith("ERROR:"):
+        st.error(f"Error reading job description: {job_desc_text}")
+        st.stop()
     if not resume_text.strip() or not job_desc_text.strip():
         st.error("One or both files are empty or could not be read. Please check your uploads.")
         st.stop()
@@ -117,23 +134,24 @@ Cover Letter:
 """
 
     # ----------- LLM Setup -----------
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.4, streaming=False)
+    try:
+        llm = ChatOpenAI(openai_api_key=api_key, model="gpt-4o", temperature=0.4, streaming=False)
+    except Exception as e:
+        st.error(f"Failed to initialize OpenAI LLM: {e}")
+        st.stop()
 
     resume_chain = LLMChain(
         llm=llm,
         prompt=PromptTemplate(input_variables=["resume"], template=resume_prompt)
     )
-
     job_desc_chain = LLMChain(
         llm=llm,
         prompt=PromptTemplate(input_variables=["job_desc"], template=job_desc_prompt)
     )
-
     gap_chain = LLMChain(
         llm=llm,
         prompt=PromptTemplate(input_variables=["resume_info", "job_requirements"], template=gap_prompt)
     )
-
     cover_letter_chain = LLMChain(
         llm=llm,
         prompt=PromptTemplate(
@@ -144,31 +162,52 @@ Cover Letter:
 
     with st.spinner("Analyzing resume and job description..."):
         # Step 1: Analyze resume
-        resume_info = resume_chain.run(resume=resume_text)
-        st.subheader("Resume Information Extracted")
-        st.code(resume_info, language="markdown")
+        try:
+            resume_info = resume_chain.run(resume=resume_text)
+            st.subheader("Resume Information Extracted")
+            st.code(resume_info, language="markdown")
+        except Exception as e:
+            st.error(f"LLM error while analyzing resume: {e}")
+            st.stop()
 
         # Step 2: Analyze job description
-        job_requirements = job_desc_chain.run(job_desc=job_desc_text)
-        st.subheader("Job Requirements Extracted")
-        st.code(job_requirements, language="markdown")
+        try:
+            job_requirements = job_desc_chain.run(job_desc=job_desc_text)
+            st.subheader("Job Requirements Extracted")
+            st.code(job_requirements, language="markdown")
+        except Exception as e:
+            st.error(f"LLM error while analyzing job description: {e}")
+            st.stop()
 
         # Step 3: Gap analysis
-        gap_analysis = gap_chain.run(
-            resume_info=resume_info,
-            job_requirements=job_requirements
-        )
-        st.subheader("Gap Analysis")
-        st.code(gap_analysis, language="markdown")
+        try:
+            gap_analysis = gap_chain.run(
+                resume_info=resume_info,
+                job_requirements=job_requirements
+            )
+            st.subheader("Gap Analysis")
+            st.code(gap_analysis, language="markdown")
+        except Exception as e:
+            st.error(f"LLM error during gap analysis: {e}")
+            st.stop()
 
         # Step 4: Generate cover letter
-        cover_letter = cover_letter_chain.run(
-            resume_info=resume_info,
-            job_requirements=job_requirements,
-            gap_analysis=gap_analysis
-        )
-        st.subheader("Tailored Cover Letter")
-        st.write(cover_letter)
-        st.success("Done! You can copy the cover letter above for your application.")
+        try:
+            cover_letter = cover_letter_chain.run(
+                resume_info=resume_info,
+                job_requirements=job_requirements,
+                gap_analysis=gap_analysis
+            )
+            st.subheader("Tailored Cover Letter")
+            st.write(cover_letter)
+            st.download_button(
+                label="Download Cover Letter",
+                data=cover_letter,
+                file_name="cover_letter.txt",
+                mime="text/plain"
+            )
+            st.success("Done! You can copy or download the cover letter above for your application.")
+        except Exception as e:
+            st.error(f"LLM error while generating cover letter: {e}")
 
-st.caption("Built with 🦜 LangChain + Streamlit")
+st.caption("Built with 🦜 LangChain + Streamlit | [GitHub](https://github.com/your-repo-link)")
